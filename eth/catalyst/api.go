@@ -321,6 +321,9 @@ func (api *ConsensusAPI) forkchoiceUpdated(ctx context.Context, update engine.Fo
 			PayloadID: id,
 		}
 	}
+	if err := api.validateForkchoiceState(block, update); err != nil {
+		return engine.STATUS_INVALID, err
+	}
 	if rawdb.ReadCanonicalHash(api.eth.ChainDb(), block.NumberU64()) != update.HeadBlockHash {
 		// Block is not canonical, set head.
 		if latestValid, err := api.eth.BlockChain().SetCanonical(block); err != nil {
@@ -414,6 +417,43 @@ func (api *ConsensusAPI) forkchoiceUpdated(ctx context.Context, update engine.Fo
 		return valid(&id), nil
 	}
 	return valid(nil), nil
+}
+
+func (api *ConsensusAPI) validateForkchoiceState(head *types.Block, update engine.ForkchoiceStateV1) error {
+	checks := []struct {
+		hash common.Hash
+		name string
+	}{
+		{hash: update.FinalizedBlockHash, name: "final"},
+		{hash: update.SafeBlockHash, name: "safe"},
+	}
+	for _, check := range checks {
+		if check.hash == (common.Hash{}) {
+			continue
+		}
+		block := api.eth.BlockChain().GetBlockByHash(check.hash)
+		if block == nil {
+			return engine.InvalidForkChoiceState.With(errors.New(check.name + " block not available in database"))
+		}
+		if !api.isAncestor(head, block) {
+			return engine.InvalidForkChoiceState.With(errors.New(check.name + " block not in canonical chain"))
+		}
+	}
+	return nil
+}
+
+func (api *ConsensusAPI) isAncestor(head, ancestor *types.Block) bool {
+	if ancestor.NumberU64() > head.NumberU64() {
+		return false
+	}
+	current := head.Header()
+	for current.Number.Uint64() > ancestor.NumberU64() {
+		current = api.eth.BlockChain().GetHeader(current.ParentHash, current.Number.Uint64()-1)
+		if current == nil {
+			return false
+		}
+	}
+	return current.Hash() == ancestor.Hash()
 }
 
 // ExchangeTransitionConfigurationV1 checks the given configuration against

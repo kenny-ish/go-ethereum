@@ -562,6 +562,45 @@ func TestForkchoiceUpdatedCanonicalAboveHead(t *testing.T) {
 	}
 }
 
+func TestForkchoiceUpdatedRejectsNonCanonicalSafeBlock(t *testing.T) {
+	genesis, blocks := generateMergeChain(10, true)
+	n, ethservice := startEthService(t, genesis, blocks)
+	defer n.Close()
+
+	api := newConsensusAPIWithoutHeartbeat(ethservice)
+	canonicalHead := blocks[9]
+
+	// Build a valid side chain from block 7 without changing the canonical head.
+	sidePayload := getNewPayload(t, api, blocks[7].Header(), nil, nil)
+	if status, err := api.NewPayloadV1(context.Background(), *sidePayload); err != nil || status.Status != engine.VALID {
+		t.Fatalf("failed to insert side-chain block: status=%v err=%v", status.Status, err)
+	}
+	sideBlock, err := engine.ExecutableDataToBlock(*sidePayload, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to convert side-chain payload: %v", err)
+	}
+	sidePayload = getNewPayload(t, api, sideBlock.Header(), nil, nil)
+	if status, err := api.NewPayloadV1(context.Background(), *sidePayload); err != nil || status.Status != engine.VALID {
+		t.Fatalf("failed to insert side-chain tip: status=%v err=%v", status.Status, err)
+	}
+
+	// The safe block is canonical at the current head, but is not an ancestor of
+	// the requested side-chain head. The update must be rejected atomically.
+	update := engine.ForkchoiceStateV1{
+		HeadBlockHash:      sidePayload.BlockHash,
+		SafeBlockHash:      blocks[8].Hash(),
+		FinalizedBlockHash: blocks[7].Hash(),
+	}
+	_, err = api.ForkchoiceUpdatedV1(context.Background(), update, nil)
+	var apiErr *engine.EngineAPIError
+	if !errors.As(err, &apiErr) || apiErr.ErrorCode() != engine.InvalidForkChoiceState.ErrorCode() {
+		t.Fatalf("invalid forkchoice update: have error %v, want %v", err, engine.InvalidForkChoiceState)
+	}
+	if head := ethservice.BlockChain().CurrentBlock().Hash(); head != canonicalHead.Hash() {
+		t.Fatalf("invalid forkchoice update changed head: have %s, want %s", head, canonicalHead.Hash())
+	}
+}
+
 func TestFullAPI(t *testing.T) {
 	genesis, preMergeBlocks := generateMergeChain(10, false)
 	n, ethservice := startEthService(t, genesis, preMergeBlocks)
